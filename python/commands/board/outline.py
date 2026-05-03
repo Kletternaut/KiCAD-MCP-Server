@@ -28,6 +28,12 @@ class BoardOutlineCommands:
                     "errorDetails": "Load or create a board first",
                 }
 
+            # Remove existing Edge.Cuts items before drawing the new outline
+            edge_layer = self.board.GetLayerID("Edge.Cuts")
+            for item in list(self.board.GetDrawings()):
+                if item.GetLayer() == edge_layer:
+                    self.board.Remove(item)
+
             # Claude sends dimensions nested inside a "params" key:
             # {"shape": "rectangle", "params": {"x": 0, "y": 0, "width": 38, ...}}
             # Unwrap the inner dict if present so we read dimensions from the right level.

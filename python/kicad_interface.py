@@ -7,13 +7,19 @@ and KiCAD's Python API (pcbnew). It receives commands via stdin as
 JSON and returns responses via stdout also as JSON.
 """
 
+import gc
 import json
 import logging
 import os
 import sys
 import traceback
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Suppress PIL duplicate handler warnings that appear when PIL is re-initialized
+# in the same process (e.g. after board reload via open_project).
+warnings.filterwarnings("ignore", message=".*duplicate image handler.*")
 
 import sexpdata
 from annotations import AnnotationLoader
@@ -43,7 +49,42 @@ except (OSError, PermissionError):
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
+
+# Suppress verbose DEBUG output from third-party libraries.
+# kicad-skip (skip.sexp.parser) logs every single S-expression token at
+# DEBUG level which floods the log file and makes the server unresponsive
+# when tools like get_net_at_point are called repeatedly.
+for _noisy_logger in (
+    "skip",
+    "skip.sexp",
+    "skip.sexp.parser",
+    "skip.collection",
+    "skip.eeschema",
+    "skip.pcbnew",
+    "kicad_skip",
+    "sexpdata",
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
 logger = logging.getLogger("kicad_interface")
+
+
+def _load_mcp_version() -> str:
+    """Load MCP version from the repository package.json.
+
+    This keeps Python and Node logging in sync with a single source of truth.
+    """
+    try:
+        package_json = Path(__file__).resolve().parents[1] / "package.json"
+        with package_json.open("r", encoding="utf-8") as f:
+            return json.load(f).get("version", "unknown")
+    except Exception as e:
+        logger.debug(f"Failed to read version from package.json: {e}")
+        return "unknown"
+
+
+KICAD_MCP_VERSION = _load_mcp_version()
+logger.info(f"KiCAD-MCP-Server v{KICAD_MCP_VERSION} starting...")
 
 # Log Python environment details
 logger.info(f"Python version: {sys.version}")
@@ -114,6 +155,10 @@ logger.info(f"Current Python path: {sys.path}")
 AUTO_LAUNCH_KICAD = os.environ.get("KICAD_AUTO_LAUNCH", "false").lower() == "true"
 if AUTO_LAUNCH_KICAD:
     logger.info("KiCAD auto-launch enabled")
+
+# Auto-save after board mutations (can be disabled for testing/dry-runs)
+AUTO_SAVE_BOARD = os.environ.get("KICAD_MCP_AUTO_SAVE", "true").lower() != "false"
+logger.info(f"Board auto-save after mutations: {'enabled' if AUTO_SAVE_BOARD else 'DISABLED'}")
 
 # Check which backend to use
 # KICAD_BACKEND can be: 'auto', 'ipc', or 'swig'
@@ -348,6 +393,7 @@ class KiCADInterface:
             "get_nets_list": self.routing_commands.get_nets_list,
             "create_netclass": self.routing_commands.create_netclass,
             "add_copper_pour": self.routing_commands.add_copper_pour,
+            "resize_zones": self.routing_commands.resize_zones,
             "route_differential_pair": self.routing_commands.route_differential_pair,
             "refill_zones": self._handle_refill_zones,
             # Design rule commands
@@ -580,6 +626,7 @@ class KiCADInterface:
         "add_text",
         "add_board_text",
         "add_copper_pour",
+        "resize_zones",
         "refill_zones",
         "import_svg_logo",
         "sync_schematic_to_board",
@@ -591,7 +638,11 @@ class KiCADInterface:
         """Save board to disk after SWIG mutations.
         Called automatically after every board-mutating SWIG command so that
         data is not lost if Claude hits the context limit before save_project.
+        Disable with env var KICAD_MCP_AUTO_SAVE=false.
         """
+        if not AUTO_SAVE_BOARD:
+            logger.debug("Auto-save skipped (KICAD_MCP_AUTO_SAVE=false)")
+            return
         try:
             if self.board:
                 board_path = self.board.GetFileName()
@@ -606,6 +657,11 @@ class KiCADInterface:
         logger.debug("Updating board reference in command handlers")
         self.project_commands.board = self.board
         self.board_commands.board = self.board
+        # Also update sub-handlers inside board_commands
+        self.board_commands.size_commands.board = self.board
+        self.board_commands.layer_commands.board = self.board
+        self.board_commands.outline_commands.board = self.board
+        self.board_commands.view_commands.board = self.board
         self.component_commands.board = self.board
         self.routing_commands.board = self.board
         self.design_rule_commands.board = self.board

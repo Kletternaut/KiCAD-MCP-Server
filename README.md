@@ -734,7 +734,7 @@ which python3  # Example output: /usr/bin/python3
 python3 -c "import pcbnew; print(pcbnew.GetBuildVersion())"  # Verify pcbnew access
 ```
 
-### GitHub Copilot (VS Code)
+### GitHub Copilot (VS Code) &nbsp;<img src="https://img.shields.io/badge/NEW-CC0000?style=flat-square" alt="NEW" />
 
 Copy the template to your workspace:
 

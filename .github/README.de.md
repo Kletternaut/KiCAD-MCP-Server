@@ -57,7 +57,7 @@ npm run build
 
 4. KI-Client konfigurieren — siehe [Plattform-Anleitung](../docs/PLATFORM_GUIDE.md)
 
-### GitHub Copilot (VS Code)
+### GitHub Copilot (VS Code) &nbsp;<img src="https://img.shields.io/badge/NEU-CC0000?style=flat-square" alt="NEU" />
 
 Template kopieren:
 

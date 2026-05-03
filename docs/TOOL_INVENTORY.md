@@ -95,6 +95,7 @@ _Source: `src/tools/routing.ts`_
 | `refill_zones`            | Refill all copper zones                              | Additional       |
 | `route_pad_to_pad`        | Route trace between two pads with auto-via insertion | Additional       |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
+| `resize_zones`            | Resize Cu zone outlines to copper extents + padding  | Additional       |
 
 ---
 
@@ -344,7 +345,7 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Routed               | 72      | Always visible (registered directly)     |
 | Additional           | 44      | Always visible, registered directly      |
 | Router/Discovery     | 3       | Tool-Discovery (`router.ts`, registered) |
-| **Total registered** | **137** | Verifiziert via VS Code MCP Discovery    |
+| **Total registered** | **138** | Verifiziert via VS Code MCP Discovery    |
 
 ## Summary by Category
 
@@ -353,7 +354,7 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Project Management   | 5          |
 | Board Management     | 12         |
 | Component Management | 16         |
-| Routing              | 13         |
+| Routing              | 14         |
 | Design Rules / DRC   | 8          |
 | Export               | 8          |
 | Schematic            | 43         |
@@ -366,10 +367,10 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Freerouting          | 4          |
 | UI Management        | 2          |
 | Router / Discovery   | 3          |
-| **Total registered** | **137**    |
+| **Total registered** | **138**    |
 
-> **Verified:** VS Code MCP Discovery Log meldet **137** registrierte Tools.
+> **Verified:** VS Code MCP Discovery Log meldet **138** registrierte Tools.
 
 ## Token Impact
 
-Alle 137 registrierten Tools sind stets für den LLM sichtbar. Die Discovery-Tools in `router.ts` ermöglichen dem Modell, Tools nach Kategorie oder Stichwort zu durchsuchen.
+Alle 138 registrierten Tools sind stets für den LLM sichtbar. Die Discovery-Tools in `router.ts` ermöglichen dem Modell, Tools nach Kategorie oder Stichwort zu durchsuchen.

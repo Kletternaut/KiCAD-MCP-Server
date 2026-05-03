@@ -5,6 +5,7 @@
 
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { KiCADMcpServer } from "./server.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./logger.js";
@@ -12,6 +13,8 @@ import { logger } from "./logger.js";
 // Get the current directory
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json");
 
 /**
  * Main function to start the KiCAD MCP server
@@ -37,7 +40,7 @@ async function main() {
     // Setup graceful shutdown
     setupGracefulShutdown(server);
 
-    logger.info("KiCAD MCP server started with STDIO transport");
+    logger.info(`KiCAD-MCP-Server v${version} started with STDIO transport`);
   } catch (error) {
     logger.error(`Failed to start KiCAD MCP server: ${error}`);
     process.exit(1);

@@ -1238,6 +1238,134 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def resize_zones(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Resize all copper zones on given layers to a new bounding rectangle.
+
+        The new rectangle is defined by x/y (top-left) + width/height, or
+        by left/top/right/bottom — whichever is provided.  If no explicit
+        bounds are given the tool computes the Cu-extents of the board and
+        adds the requested padding (default 1 mm on each side).
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            unit = params.get("unit", "mm")
+            scale = 1000000 if unit == "mm" else 25400000  # mm → nm
+
+            # --- Determine target rectangle ---
+            if "left" in params:
+                left_nm = int(params["left"] * scale)
+                top_nm = int(params["top"] * scale)
+                right_nm = int(params["right"] * scale)
+                bottom_nm = int(params["bottom"] * scale)
+            elif "x" in params:
+                left_nm = int(params["x"] * scale)
+                top_nm = int(params["y"] * scale)
+                right_nm = int((params["x"] + params["width"]) * scale)
+                bottom_nm = int((params["y"] + params["height"]) * scale)
+            else:
+                # Auto-compute from copper extents
+                padding = params.get("padding", 1.0)
+                padding_nm = int(padding * scale)
+
+                edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
+                min_x = min_y = float("inf")
+                max_x = max_y = float("-inf")
+
+                def include_bbox(bbox: Any) -> None:
+                    nonlocal min_x, min_y, max_x, max_y
+                    x1 = bbox.GetX()
+                    y1 = bbox.GetY()
+                    x2 = x1 + bbox.GetWidth()
+                    y2 = y1 + bbox.GetHeight()
+                    min_x = min(min_x, x1)
+                    min_y = min(min_y, y1)
+                    max_x = max(max_x, x2)
+                    max_y = max(max_y, y2)
+
+                for track in self.board.GetTracks():
+                    if track.GetLayer() == edge_cuts_id:
+                        continue
+                    include_bbox(track.GetBoundingBox())
+
+                for fp in self.board.GetFootprints():
+                    for pad in fp.Pads():
+                        include_bbox(pad.GetBoundingBox())
+
+                if min_x == float("inf"):
+                    return {
+                        "success": False,
+                        "message": "No copper items found to derive zone bounds",
+                        "errorDetails": "Place components or provide explicit bounds",
+                    }
+
+                left_nm = int(min_x) - padding_nm
+                top_nm = int(min_y) - padding_nm
+                right_nm = int(max_x) + padding_nm
+                bottom_nm = int(max_y) + padding_nm
+
+            # --- Filter which layers to resize ---
+            layers_param = params.get("layers")  # e.g. ["F.Cu", "B.Cu"] or None = all
+            target_layer_ids = None
+            if layers_param:
+                target_layer_ids = set()
+                for lname in layers_param:
+                    lid = self.board.GetLayerID(lname)
+                    if lid >= 0:
+                        target_layer_ids.add(lid)
+
+            # --- Resize matching zones ---
+            resized = []
+            for zone in self.board.Zones():
+                if target_layer_ids is not None and zone.GetLayer() not in target_layer_ids:
+                    continue
+
+                outline = zone.Outline()
+                outline.RemoveAllContours()
+                outline.NewOutline()
+                outline.Append(pcbnew.VECTOR2I(left_nm, top_nm))
+                outline.Append(pcbnew.VECTOR2I(right_nm, top_nm))
+                outline.Append(pcbnew.VECTOR2I(right_nm, bottom_nm))
+                outline.Append(pcbnew.VECTOR2I(left_nm, bottom_nm))
+
+                net_name = zone.GetNetname()
+                layer_name = self.board.GetLayerName(zone.GetLayer())
+                resized.append({"layer": layer_name, "net": net_name})
+                logger.debug(f"Resized zone layer={layer_name} net={net_name}")
+
+            if not resized:
+                return {
+                    "success": False,
+                    "message": "No zones found to resize",
+                    "errorDetails": "Check layer names or add copper pours first",
+                }
+
+            return {
+                "success": True,
+                "message": f"Resized {len(resized)} zone(s)",
+                "bounds": {
+                    "left": left_nm / scale,
+                    "top": top_nm / scale,
+                    "right": right_nm / scale,
+                    "bottom": bottom_nm / scale,
+                    "unit": unit,
+                },
+                "zones": resized,
+            }
+
+        except Exception as e:
+            logger.error(f"Error resizing zones: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to resize zones",
+                "errorDetails": str(e),
+            }
+
     def route_differential_pair(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Route a differential pair between two sets of points or pads"""
         try:

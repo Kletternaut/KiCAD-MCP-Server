@@ -155,7 +155,7 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "add_board_outline",
-    "Draw the PCB board outline (Edge.Cuts layer) as a rectangle, rounded rectangle, circle or polygon.",
+    "Draw the PCB board outline (Edge.Cuts layer) as a rectangle, rounded rectangle, circle or polygon. Any existing Edge.Cuts items are automatically removed before the new outline is drawn, so this always replaces the current outline.",
     {
       shape: z
         .enum(["rectangle", "circle", "polygon", "rounded_rectangle"])
@@ -338,13 +338,19 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "get_board_extents",
-    "Return the bounding box (min/max X and Y) of all objects on the current PCB board.",
+    "Return the bounding box (min/max X and Y) of the current PCB board. Use source='copper' to measure actual copper/footprint extent (e.g. to fit an outline around placed components), source='footprints' for footprint courtyard bounds, or the default source='edge_cuts' for the existing Edge.Cuts outline.",
     {
       unit: z.enum(["mm", "inch"]).optional().describe("Unit of measurement for the result"),
+      source: z
+        .enum(["edge_cuts", "copper", "footprints"])
+        .optional()
+        .describe(
+          "What to measure: 'edge_cuts' (default) = existing board outline, 'copper' = all copper geometry (tracks, pads, zones), 'footprints' = all placed footprints including courtyard",
+        ),
     },
-    async ({ unit }) => {
+    async ({ unit, source }) => {
       logger.debug("Getting board extents");
-      const result = await callKicadScript("get_board_extents", { unit });
+      const result = await callKicadScript("get_board_extents", { unit, source });
 
       return {
         content: [

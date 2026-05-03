@@ -188,34 +188,146 @@ class BoardViewCommands:
             unit = params.get("unit", "mm")
             scale = 1000000 if unit == "mm" else 25400000  # nm to mm or inch
 
-            # Get board bounding box
-            board_box = self.board.GetBoardEdgesBoundingBox()
+            # Select bounding box source
+            source = params.get("source", "edge_cuts")
+            if source in ("copper", "footprints"):
+                # Compute bounds from real geometry (bounding boxes), not only
+                # center points. This ensures full pad/component outlines are
+                # included when deriving copper/footprint extents.
+                edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
+                min_x = min_y = float("inf")
+                max_x = max_y = float("-inf")
 
-            # Extract bounds in nanometers, then convert
-            left = board_box.GetLeft() / scale
-            top = board_box.GetTop() / scale
-            right = board_box.GetRight() / scale
-            bottom = board_box.GetBottom() / scale
-            width = board_box.GetWidth() / scale
-            height = board_box.GetHeight() / scale
+                def include_bbox(bbox: Any) -> None:
+                    nonlocal min_x, min_y, max_x, max_y
+                    x1 = bbox.GetX()
+                    y1 = bbox.GetY()
+                    x2 = x1 + bbox.GetWidth()
+                    y2 = y1 + bbox.GetHeight()
+                    min_x = min(min_x, x1)
+                    min_y = min(min_y, y1)
+                    max_x = max(max_x, x2)
+                    max_y = max(max_y, y2)
 
-            # Get center point
-            center_x = board_box.GetCenter().x / scale
-            center_y = board_box.GetCenter().y / scale
+                if source == "footprints":
+                    for fp in self.board.GetFootprints():
+                        include_bbox(fp.GetBoundingBox())
+                else:
+                    for track in self.board.GetTracks():
+                        if track.GetLayer() == edge_cuts_id:
+                            continue
+                        include_bbox(track.GetBoundingBox())
 
-            return {
-                "success": True,
-                "extents": {
-                    "left": left,
-                    "top": top,
-                    "right": right,
-                    "bottom": bottom,
-                    "width": width,
-                    "height": height,
-                    "center": {"x": center_x, "y": center_y},
-                    "unit": unit,
-                },
-            }
+                    for fp in self.board.GetFootprints():
+                        for pad in fp.Pads():
+                            include_bbox(pad.GetBoundingBox())
+
+                if min_x == float("inf"):
+                    return {
+                        "success": False,
+                        "message": "No copper items found on the board",
+                        "errorDetails": "Place components or route tracks first",
+                    }
+
+                left = min_x / scale
+                top = min_y / scale
+                right = max_x / scale
+                bottom = max_y / scale
+                width = right - left
+                height = bottom - top
+                center_x = (left + right) / 2
+                center_y = (top + bottom) / 2
+
+                return {
+                    "success": True,
+                    "extents": {
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "width": width,
+                        "height": height,
+                        "center": {"x": center_x, "y": center_y},
+                        "unit": unit,
+                        "source": source,
+                    },
+                }
+            else:
+                # Default: Edge.Cuts outline — iterate drawings to avoid
+                # GetBoardEdgesBoundingBox() which has a SWIG memory ownership
+                # bug (returns SwigPyObject instead of BOX2I on repeated calls).
+                edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
+                min_x = min_y = float("inf")
+                max_x = max_y = float("-inf")
+
+                for item in self.board.GetDrawings():
+                    if item.GetLayer() != edge_cuts_id:
+                        continue
+                    shape_type = item.GetShape()
+                    if shape_type == pcbnew.SHAPE_T_SEGMENT:
+                        for pt in (item.GetStart(), item.GetEnd()):
+                            min_x = min(min_x, pt.x)
+                            min_y = min(min_y, pt.y)
+                            max_x = max(max_x, pt.x)
+                            max_y = max(max_y, pt.y)
+                    elif shape_type == pcbnew.SHAPE_T_RECT:
+                        for pt in (item.GetStart(), item.GetEnd()):
+                            min_x = min(min_x, pt.x)
+                            min_y = min(min_y, pt.y)
+                            max_x = max(max_x, pt.x)
+                            max_y = max(max_y, pt.y)
+                    elif shape_type == pcbnew.SHAPE_T_CIRCLE:
+                        cx = item.GetCenter().x
+                        cy = item.GetCenter().y
+                        r = item.GetRadius()
+                        min_x = min(min_x, cx - r)
+                        min_y = min(min_y, cy - r)
+                        max_x = max(max_x, cx + r)
+                        max_y = max(max_y, cy + r)
+                    elif shape_type == pcbnew.SHAPE_T_POLY:
+                        for i in range(item.GetPolyShape().PointCount()):
+                            pt = item.GetPolyShape().CPoint(i)
+                            min_x = min(min_x, pt.x)
+                            min_y = min(min_y, pt.y)
+                            max_x = max(max_x, pt.x)
+                            max_y = max(max_y, pt.y)
+                    elif shape_type == pcbnew.SHAPE_T_ARC:
+                        # Use start, mid, end to approximate arc bounds
+                        for pt in (item.GetStart(), item.GetEnd()):
+                            min_x = min(min_x, pt.x)
+                            min_y = min(min_y, pt.y)
+                            max_x = max(max_x, pt.x)
+                            max_y = max(max_y, pt.y)
+
+                if min_x == float("inf"):
+                    return {
+                        "success": False,
+                        "message": "No Edge.Cuts items found on the board",
+                        "errorDetails": "Add a board outline first",
+                    }
+
+                left = min_x / scale
+                top = min_y / scale
+                right = max_x / scale
+                bottom = max_y / scale
+                width = right - left
+                height = bottom - top
+                center_x = (left + right) / 2
+                center_y = (top + bottom) / 2
+                return {
+                    "success": True,
+                    "extents": {
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "width": width,
+                        "height": height,
+                        "center": {"x": center_x, "y": center_y},
+                        "unit": unit,
+                        "source": source,
+                    },
+                }
 
         except Exception as e:
             logger.error(f"Error getting board extents: {str(e)}")

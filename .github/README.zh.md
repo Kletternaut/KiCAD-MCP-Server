@@ -57,7 +57,7 @@ npm run build
 
 4. 配置 AI 客户端 — 参见 [平台指南](../docs/PLATFORM_GUIDE.md)
 
-### GitHub Copilot（VS Code）
+### GitHub Copilot（VS Code）&nbsp;<img src="https://img.shields.io/badge/新功能-CC0000?style=flat-square" alt="新功能" />
 
 复制配置模板：
 

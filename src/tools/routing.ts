@@ -119,6 +119,35 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Resize zones tool
+  server.tool(
+    "resize_zones",
+    "Resize the outline polygon of all copper zones (fills/pours) on the board. Without explicit bounds the tool auto-computes the bounding box of all copper geometry (tracks + pads) and adds the requested padding. Use this to fit zones snugly around placed components.",
+    {
+      padding: z
+        .number()
+        .optional()
+        .describe(
+          "Padding in mm added on each side of the auto-computed copper extents (default: 1)",
+        ),
+      layers: z
+        .array(z.string())
+        .optional()
+        .describe("Limit to these layer names, e.g. ['F.Cu','B.Cu']. Omit to resize all layers."),
+      left: z.number().optional().describe("Explicit left bound (mm). Requires top/right/bottom."),
+      top: z.number().optional().describe("Explicit top bound (mm)."),
+      right: z.number().optional().describe("Explicit right bound (mm)."),
+      bottom: z.number().optional().describe("Explicit bottom bound (mm)."),
+      unit: z.enum(["mm", "inch"]).optional().describe("Unit for explicit bounds (default: mm)"),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("resize_zones", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Delete trace tool
   server.tool(
     "delete_trace",

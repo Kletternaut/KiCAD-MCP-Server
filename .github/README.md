@@ -57,7 +57,7 @@ npm run build
 
 4. Configure your AI client — see [Platform Guide](../docs/PLATFORM_GUIDE.md)
 
-### GitHub Copilot (VS Code)
+### GitHub Copilot (VS Code) &nbsp;<img src="https://img.shields.io/badge/NEW-CC0000?style=flat-square" alt="NEW" />
 
 Copy `config/vscode-mcp.example.json` to `.vscode/mcp.json` — VS Code auto-detects it. → [Full setup guide](../README.md#github-copilot-vs-code)
 
