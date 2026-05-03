@@ -112,14 +112,22 @@ if sys.platform == "win32":
                 ]
                 logger.info(f"  Versions found: {', '.join(versions)}")
                 for version in versions:
-                    python_path = os.path.join(
-                        base_path, version, "lib", "python3", "dist-packages"
-                    )
-                    if os.path.exists(python_path):
-                        logger.info(f"  ✓ Python path exists: {python_path}")
-                        found_kicad = True
-                    else:
-                        logger.warning(f"  ✗ Python path missing: {python_path}")
+                    # Windows KiCAD uses bin\Lib\site-packages, not lib\python3\dist-packages
+                    candidate_paths = [
+                        os.path.join(base_path, version, "bin", "Lib", "site-packages"),
+                        os.path.join(base_path, version, "lib", "python3", "dist-packages"),
+                    ]
+                    path_found = False
+                    for python_path in candidate_paths:
+                        if os.path.exists(python_path):
+                            logger.info(f"  ✓ Python path exists: {python_path}")
+                            found_kicad = True
+                            path_found = True
+                            break
+                    if not path_found:
+                        logger.warning(
+                            f"  ✗ Python path missing for version {version} (checked bin/Lib/site-packages and lib/python3/dist-packages)"
+                        )
             except Exception as e:
                 logger.warning(f"  Could not list versions: {e}")
 

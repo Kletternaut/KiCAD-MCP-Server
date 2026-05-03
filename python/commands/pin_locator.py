@@ -231,20 +231,39 @@ class PinLocator:
         from commands.wire_dragger import WireDragger
 
         sch_key = str(schematic_path)
+        sexp_data = None
         try:
             if sch_key not in self._sexp_cache:
                 with open(schematic_path, "r", encoding="utf-8") as f:
                     self._sexp_cache[sch_key] = _sexpdata.loads(f.read())
+            sexp_data = self._sexp_cache[sch_key]
         except Exception as e:
             logger.error(f"_get_symbol_transform: failed to parse {schematic_path}: {e}")
-            return None
+            # File missing or unreadable — fall through to skip-cache fallback below.
 
-        found = WireDragger.find_symbol(self._sexp_cache[sch_key], symbol_reference)
-        if found is None:
-            return None
+        if sexp_data is not None:
+            found = WireDragger.find_symbol(sexp_data, symbol_reference)
+            if found is not None:
+                _, sym_x, sym_y, rotation, lib_id, mirror_x, mirror_y = found
+                return sym_x, sym_y, rotation, mirror_x, mirror_y, lib_id
 
-        _, sym_x, sym_y, rotation, lib_id, mirror_x, mirror_y = found
-        return sym_x, sym_y, rotation, mirror_x, mirror_y, lib_id
+        # Fallback: symbol not found in sexp data (file missing, mock test, or symbol
+        # only present in skip-schematic cache populated by the caller).
+        if sch_key in self._schematic_cache:
+            for sym in getattr(self._schematic_cache[sch_key], "symbol", None) or []:
+                try:
+                    ref = sym.property.Reference.value.rstrip("_")
+                    if ref != symbol_reference:
+                        continue
+                    pos = sym.at.value
+                    lib_id = sym.lib_id.value if hasattr(sym, "lib_id") else ""
+                    sym_x = float(pos[0])
+                    sym_y = float(pos[1])
+                    rotation = float(pos[2]) if len(pos) > 2 else 0.0
+                    return sym_x, sym_y, rotation, False, False, lib_id
+                except Exception:
+                    pass
+        return None
 
     def get_pin_angle(
         self, schematic_path: Path, symbol_reference: str, pin_number: str
@@ -375,7 +394,7 @@ class PinLocator:
 
             abs_x, abs_y = WireDragger.pin_world_xy(
                 pin_data["x"],
-                pin_data["y"],
+                -pin_data["y"],  # lib y-up → schematic y-down
                 symbol_x,
                 symbol_y,
                 symbol_rotation,

@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from utils.lib_table_parser import parse_lib_table
+
 logger = logging.getLogger("kicad_interface")
 
 
@@ -79,47 +81,22 @@ class LibraryManager:
         return None
 
     def _parse_fp_lib_table(self, table_path: Path) -> None:
-        """
-        Parse fp-lib-table file
-
-        Format is S-expression (Lisp-like):
-        (fp_lib_table
-          (lib (name "Library_Name")(type KiCad)(uri "${KICAD9_FOOTPRINT_DIR}/Library.pretty")(options "")(descr "Description"))
-        )
-        """
-        try:
-            with open(table_path, "r") as f:
-                content = f.read()
-
-            # Simple regex-based parser for lib entries
-            # Pattern: (lib (name "NAME")(type TYPE)(uri "URI")...)
-            lib_pattern = r'\(lib\s+\(name\s+"?([^")\s]+)"?\)\s*\(type\s+"?([^")\s]+)"?\)\s*\(uri\s+"?([^")\s]+)"?'
-
-            for match in re.finditer(lib_pattern, content, re.IGNORECASE):
-                nickname = match.group(1)
-                lib_type = match.group(2)
-                uri = match.group(3)
-
-                if lib_type.lower() == "table":
-                    table_uri = uri
-                    if os.path.isabs(table_uri) and os.path.isfile(table_uri):
-                        logger.info(f"  Following Table reference: {nickname} -> {table_uri}")
-                        self._parse_fp_lib_table(Path(table_uri))
-                    else:
-                        logger.warning(f"  Could not resolve Table URI: {table_uri}")
-                    continue
-
-                # Resolve environment variables in URI
-                resolved_uri = self._resolve_uri(uri)
-
-                if resolved_uri:
-                    self.libraries[nickname] = resolved_uri
-                    logger.debug(f"  Found library: {nickname} -> {resolved_uri}")
+        """Parse fp-lib-table file using sexpdata (handles spaces in paths on all platforms)."""
+        for nickname, lib_type, uri in parse_lib_table(table_path):
+            if lib_type.lower() == "table":
+                if os.path.isabs(uri) and os.path.isfile(uri):
+                    logger.info(f"  Following Table reference: {nickname} -> {uri}")
+                    self._parse_fp_lib_table(Path(uri))
                 else:
-                    logger.warning(f"  Could not resolve URI for library {nickname}: {uri}")
+                    logger.warning(f"  Could not resolve Table URI: {uri}")
+                continue
 
-        except Exception as e:
-            logger.error(f"Error parsing fp-lib-table at {table_path}: {e}")
+            resolved_uri = self._resolve_uri(uri)
+            if resolved_uri:
+                self.libraries[nickname] = resolved_uri
+                logger.debug(f"  Found library: {nickname} -> {resolved_uri}")
+            else:
+                logger.warning(f"  Could not resolve URI for library {nickname}: {uri}")
 
     def _resolve_uri(self, uri: str) -> Optional[str]:
         """
