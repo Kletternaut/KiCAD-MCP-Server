@@ -1,4 +1,4 @@
-"""Unit tests for resize_zones – verifies SwigPyObject workaround."""
+"""Unit tests for resize_zones – board.Zones() returns a tuple of pcbnew.ZONE."""
 
 import sys
 import types
@@ -36,8 +36,7 @@ def _make_zone(layer_id, net_name):
 class TestResizeZones:
     def _make_board(self, zones):
         board = MagicMock()
-        board.GetAreaCount.return_value = len(zones)
-        board.GetArea.side_effect = lambda i: zones[i]
+        board.Zones.return_value = tuple(zones)
         board.GetLayerID.return_value = 0
         board.GetLayerName.return_value = "F.Cu"
         return board
