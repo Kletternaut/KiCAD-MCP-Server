@@ -1320,8 +1320,11 @@ class RoutingCommands:
                         target_layer_ids.add(lid)
 
             # --- Resize matching zones ---
+            # board.Zones() can return a non-iterable SwigPyObject on some KiCad
+            # builds; use GetAreaCount()/GetArea(i) instead.
             resized = []
-            for zone in self.board.Zones():
+            zone_count = self.board.GetAreaCount() if hasattr(self.board, "GetAreaCount") else 0
+            for zone in [self.board.GetArea(i) for i in range(zone_count)]:
                 if target_layer_ids is not None and zone.GetLayer() not in target_layer_ids:
                     continue
 
