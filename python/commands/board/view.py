@@ -253,51 +253,113 @@ class BoardViewCommands:
                     },
                 }
             else:
-                # Default: Edge.Cuts outline — iterate drawings to avoid
-                # GetBoardEdgesBoundingBox() which has a SWIG memory ownership
-                # bug (returns SwigPyObject instead of BOX2I on repeated calls).
-                edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
+                # Default: Edge.Cuts outline — parse .kicad_pcb with sexpdata
+                # to avoid GetDrawings() / GetBoardEdgesBoundingBox() SWIG bugs
+                # that return SwigPyObject after board mutations.
+                import sexpdata
+
+                board_path = self.board.GetFileName()
+                if not board_path:
+                    return {
+                        "success": False,
+                        "message": "Board has no file path — cannot read Edge.Cuts",
+                        "errorDetails": "Save the board first",
+                    }
+
+                with open(board_path, encoding="utf-8") as fh:
+                    data = sexpdata.loads(fh.read())
+
                 min_x = min_y = float("inf")
                 max_x = max_y = float("-inf")
 
-                for item in self.board.GetDrawings():
-                    if item.GetLayer() != edge_cuts_id:
+                def _sym(v: Any) -> str:
+                    return v.value() if hasattr(v, "value") else str(v)
+
+                def _update(x: float, y: float) -> None:
+                    nonlocal min_x, min_y, max_x, max_y
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
+
+                def _xy_val(node: list) -> tuple:
+                    """Return (x, y) from an (xy x y) node."""
+                    return float(node[1]), float(node[2])
+
+                for item in data:
+                    if not (
+                        isinstance(item, list)
+                        and item
+                        and _sym(item[0]) == "gr_line"
+                        or isinstance(item, list)
+                        and item
+                        and _sym(item[0]) == "gr_rect"
+                        or isinstance(item, list)
+                        and item
+                        and _sym(item[0]) == "gr_circle"
+                        or isinstance(item, list)
+                        and item
+                        and _sym(item[0]) == "gr_poly"
+                        or isinstance(item, list)
+                        and item
+                        and _sym(item[0]) == "gr_arc"
+                    ):
                         continue
-                    shape_type = item.GetShape()
-                    if shape_type == pcbnew.SHAPE_T_SEGMENT:
-                        for pt in (item.GetStart(), item.GetEnd()):
-                            min_x = min(min_x, pt.x)
-                            min_y = min(min_y, pt.y)
-                            max_x = max(max_x, pt.x)
-                            max_y = max(max_y, pt.y)
-                    elif shape_type == pcbnew.SHAPE_T_RECT:
-                        for pt in (item.GetStart(), item.GetEnd()):
-                            min_x = min(min_x, pt.x)
-                            min_y = min(min_y, pt.y)
-                            max_x = max(max_x, pt.x)
-                            max_y = max(max_y, pt.y)
-                    elif shape_type == pcbnew.SHAPE_T_CIRCLE:
-                        cx = item.GetCenter().x
-                        cy = item.GetCenter().y
-                        r = item.GetRadius()
-                        min_x = min(min_x, cx - r)
-                        min_y = min(min_y, cy - r)
-                        max_x = max(max_x, cx + r)
-                        max_y = max(max_y, cy + r)
-                    elif shape_type == pcbnew.SHAPE_T_POLY:
-                        for i in range(item.GetPolyShape().PointCount()):
-                            pt = item.GetPolyShape().CPoint(i)
-                            min_x = min(min_x, pt.x)
-                            min_y = min(min_y, pt.y)
-                            max_x = max(max_x, pt.x)
-                            max_y = max(max_y, pt.y)
-                    elif shape_type == pcbnew.SHAPE_T_ARC:
-                        # Use start, mid, end to approximate arc bounds
-                        for pt in (item.GetStart(), item.GetEnd()):
-                            min_x = min(min_x, pt.x)
-                            min_y = min(min_y, pt.y)
-                            max_x = max(max_x, pt.x)
-                            max_y = max(max_y, pt.y)
+
+                    # Check layer == "Edge.Cuts"
+                    layer_name = ""
+                    for child in item[1:]:
+                        if isinstance(child, list) and child and _sym(child[0]) == "layer":
+                            v = child[1]
+                            layer_name = v if isinstance(v, str) else _sym(v)
+                            break
+                    if layer_name != "Edge.Cuts":
+                        continue
+
+                    shape = _sym(item[0])
+                    if shape in ("gr_line", "gr_arc"):
+                        for child in item[1:]:
+                            if (
+                                isinstance(child, list)
+                                and child
+                                and _sym(child[0]) in ("start", "end", "mid")
+                            ):
+                                x, y = _xy_val(child)
+                                _update(x, y)
+                    elif shape == "gr_rect":
+                        for child in item[1:]:
+                            if (
+                                isinstance(child, list)
+                                and child
+                                and _sym(child[0]) in ("start", "end")
+                            ):
+                                x, y = _xy_val(child)
+                                _update(x, y)
+                    elif shape == "gr_circle":
+                        cx: Any = None
+                        cy: Any = None
+                        ex: Any = None
+                        ey: Any = None
+                        for child in item[1:]:
+                            if isinstance(child, list) and child:
+                                tag = _sym(child[0])
+                                if tag == "center":
+                                    cx, cy = _xy_val(child)
+                                elif tag == "end":
+                                    ex, ey = _xy_val(child)
+                        if cx is not None and ex is not None:
+                            import math
+
+                            r = math.hypot(float(ex) - float(cx), float(ey) - float(cy))
+                            _update(float(cx) - r, float(cy) - r)
+                            _update(float(cx) + r, float(cy) + r)
+                    elif shape == "gr_poly":
+                        for child in item[1:]:
+                            if isinstance(child, list) and child and _sym(child[0]) == "pts":
+                                for pt in child[1:]:
+                                    if isinstance(pt, list) and pt and _sym(pt[0]) == "xy":
+                                        x, y = _xy_val(pt)
+                                        _update(x, y)
 
                 if min_x == float("inf"):
                     return {
@@ -306,10 +368,11 @@ class BoardViewCommands:
                         "errorDetails": "Add a board outline first",
                     }
 
-                left = min_x / scale
-                top = min_y / scale
-                right = max_x / scale
-                bottom = max_y / scale
+                # sexpdata values are already in mm for .kicad_pcb
+                left = min_x / (1 if unit == "mm" else 25.4)
+                top = min_y / (1 if unit == "mm" else 25.4)
+                right = max_x / (1 if unit == "mm" else 25.4)
+                bottom = max_y / (1 if unit == "mm" else 25.4)
                 width = right - left
                 height = bottom - top
                 center_x = (left + right) / 2
