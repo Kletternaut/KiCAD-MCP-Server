@@ -186,6 +186,12 @@ class BoardOutlineCommands:
                         edge_layer,
                     )
 
+            # Save board immediately so subsequent SWIG calls (e.g. Zones())
+            # don't block on a dirty board object.
+            board_path = self.board.GetFileName()
+            if board_path:
+                self.board.Save(board_path)
+
             return {
                 "success": True,
                 "message": f"Added board outline: {shape}",

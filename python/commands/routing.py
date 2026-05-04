@@ -1241,11 +1241,15 @@ class RoutingCommands:
     def resize_zones(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Resize all copper zones on given layers to a new bounding rectangle.
 
-        The new rectangle is defined by x/y (top-left) + width/height, or
-        by left/top/right/bottom — whichever is provided.  If no explicit
-        bounds are given the tool computes the Cu-extents of the board and
-        adds the requested padding (default 1 mm on each side).
+        Uses direct sexpdata file manipulation instead of the SWIG zone API to
+        avoid triggering KiCad's internal zone recalculation (which blocks for >30s).
+
+        The new rectangle is defined by left/top/right/bottom, or x/y+width/height.
+        If no explicit bounds are given the tool computes the Cu-extents of the board
+        and adds the requested padding (default 1 mm on each side).
         """
+        import sexpdata
+
         try:
             if not self.board:
                 return {
@@ -1254,48 +1258,47 @@ class RoutingCommands:
                     "errorDetails": "Load or create a board first",
                 }
 
+            board_path = self.board.GetFileName()
+            if not board_path:
+                return {"success": False, "message": "Board has no file path"}
+
             unit = params.get("unit", "mm")
-            scale = 1000000 if unit == "mm" else 25400000  # mm → nm
 
-            # --- Determine target rectangle ---
+            # --- Determine target rectangle (in mm) ---
             if "left" in params:
-                left_nm = int(params["left"] * scale)
-                top_nm = int(params["top"] * scale)
-                right_nm = int(params["right"] * scale)
-                bottom_nm = int(params["bottom"] * scale)
+                left = float(params["left"])
+                top = float(params["top"])
+                right = float(params["right"])
+                bottom = float(params["bottom"])
             elif "x" in params:
-                left_nm = int(params["x"] * scale)
-                top_nm = int(params["y"] * scale)
-                right_nm = int((params["x"] + params["width"]) * scale)
-                bottom_nm = int((params["y"] + params["height"]) * scale)
+                left = float(params["x"])
+                top = float(params["y"])
+                right = left + float(params["width"])
+                bottom = top + float(params["height"])
             else:
-                # Auto-compute from copper extents
-                padding = params.get("padding", 1.0)
-                padding_nm = int(padding * scale)
-
+                # Auto-compute from copper extents via SWIG (tracks + pads only, no Zones())
+                padding = float(params.get("padding", 1.0))
                 edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
                 min_x = min_y = float("inf")
                 max_x = max_y = float("-inf")
 
-                def include_bbox(bbox: Any) -> None:
+                def _include(bbox: Any) -> None:
                     nonlocal min_x, min_y, max_x, max_y
-                    x1 = bbox.GetX()
-                    y1 = bbox.GetY()
-                    x2 = x1 + bbox.GetWidth()
-                    y2 = y1 + bbox.GetHeight()
+                    x1 = bbox.GetX() / 1_000_000
+                    y1 = bbox.GetY() / 1_000_000
+                    x2 = x1 + bbox.GetWidth() / 1_000_000
+                    y2 = y1 + bbox.GetHeight() / 1_000_000
                     min_x = min(min_x, x1)
                     min_y = min(min_y, y1)
                     max_x = max(max_x, x2)
                     max_y = max(max_y, y2)
 
                 for track in self.board.GetTracks():
-                    if track.GetLayer() == edge_cuts_id:
-                        continue
-                    include_bbox(track.GetBoundingBox())
-
+                    if track.GetLayer() != edge_cuts_id:
+                        _include(track.GetBoundingBox())
                 for fp in self.board.GetFootprints():
                     for pad in fp.Pads():
-                        include_bbox(pad.GetBoundingBox())
+                        _include(pad.GetBoundingBox())
 
                 if min_x == float("inf"):
                     return {
@@ -1303,41 +1306,101 @@ class RoutingCommands:
                         "message": "No copper items found to derive zone bounds",
                         "errorDetails": "Place components or provide explicit bounds",
                     }
+                left = min_x - padding
+                top = min_y - padding
+                right = max_x + padding
+                bottom = max_y + padding
 
-                left_nm = int(min_x) - padding_nm
-                top_nm = int(min_y) - padding_nm
-                right_nm = int(max_x) + padding_nm
-                bottom_nm = int(max_y) + padding_nm
-
-            # --- Filter which layers to resize ---
             layers_param = params.get("layers")  # e.g. ["F.Cu", "B.Cu"] or None = all
-            target_layer_ids = None
-            if layers_param:
-                target_layer_ids = set()
-                for lname in layers_param:
-                    lid = self.board.GetLayerID(lname)
-                    if lid >= 0:
-                        target_layer_ids.add(lid)
 
-            # --- Resize matching zones ---
-            # board.Zones() returns a tuple of pcbnew.ZONE objects.
+            # --- Parse .kicad_pcb with sexpdata and patch zone polygons ---
+            with open(board_path, encoding="utf-8") as f:
+                raw = f.read()
+            data = sexpdata.loads(raw)
+
+            # KiCad layer name → number map (built from (layers ...) section)
+            layer_name_to_num: dict = {}
+            for item in data[1:]:
+                if (
+                    isinstance(item, list)
+                    and len(item) > 0
+                    and isinstance(item[0], sexpdata.Symbol)
+                    and item[0].value() == "layers"
+                ):
+                    for entry in item[1:]:
+                        if isinstance(entry, list) and len(entry) >= 2:
+                            try:
+                                num = int(entry[0])
+                                name = entry[1] if isinstance(entry[1], str) else str(entry[1])
+                                layer_name_to_num[name] = num
+                            except (ValueError, TypeError):
+                                pass
+                    break
+
+            # Determine target layer numbers
+            if layers_param:
+                target_nums = {layer_name_to_num.get(n, -1) for n in layers_param}
+                target_nums.discard(-1)
+                target_names = set(layers_param)
+            else:
+                target_nums = None
+                target_names = None
+
+            def _zone_layer_name(zone_node: list) -> str:
+                for item in zone_node[1:]:
+                    if isinstance(item, list) and len(item) >= 2:
+                        if isinstance(item[0], sexpdata.Symbol) and item[0].value() == "layer":
+                            v = item[1]
+                            return (
+                                v
+                                if isinstance(v, str)
+                                else (v.value() if hasattr(v, "value") else str(v))
+                            )
+                return ""
+
+            def _build_polygon(pts: list) -> list:
+                """Build a sexpdata (polygon (pts (xy ...) ...)) node."""
+                xy_nodes = []
+                for x, y in pts:
+                    xy_nodes.append([sexpdata.Symbol("xy"), round(x, 6), round(y, 6)])
+                pts_node = [sexpdata.Symbol("pts")] + xy_nodes
+                return [sexpdata.Symbol("polygon"), pts_node]
+
+            new_rect = [(left, top), (right, top), (right, bottom), (left, bottom)]
+
             resized = []
-            for zone in self.board.Zones():
-                if target_layer_ids is not None and zone.GetLayer() not in target_layer_ids:
+            for i, item in enumerate(data):
+                if not (
+                    isinstance(item, list)
+                    and len(item) > 0
+                    and isinstance(item[0], sexpdata.Symbol)
+                    and item[0].value() == "zone"
+                ):
+                    continue
+                lname = _zone_layer_name(item)
+                if target_names is not None and lname not in target_names:
                     continue
 
-                outline = zone.Outline()
-                outline.RemoveAllContours()
-                outline.NewOutline()
-                outline.Append(pcbnew.VECTOR2I(left_nm, top_nm))
-                outline.Append(pcbnew.VECTOR2I(right_nm, top_nm))
-                outline.Append(pcbnew.VECTOR2I(right_nm, bottom_nm))
-                outline.Append(pcbnew.VECTOR2I(left_nm, bottom_nm))
-
-                net_name = zone.GetNetname()
-                layer_name = self.board.GetLayerName(zone.GetLayer())
-                resized.append({"layer": layer_name, "net": net_name})
-                logger.debug(f"Resized zone layer={layer_name} net={net_name}")
+                # Replace first (polygon ...) node inside this zone
+                new_item = []
+                polygon_replaced = False
+                for child in item:
+                    if (
+                        isinstance(child, list)
+                        and len(child) > 0
+                        and isinstance(child[0], sexpdata.Symbol)
+                        and child[0].value() == "polygon"
+                        and not polygon_replaced
+                    ):
+                        new_item.append(_build_polygon(new_rect))
+                        polygon_replaced = True
+                    else:
+                        new_item.append(child)
+                if not polygon_replaced:
+                    # No polygon yet → append one
+                    new_item.append(_build_polygon(new_rect))
+                data[i] = new_item
+                resized.append(lname)
 
             if not resized:
                 return {
@@ -1346,17 +1409,23 @@ class RoutingCommands:
                     "errorDetails": "Check layer names or add copper pours first",
                 }
 
+            with open(board_path, "w", encoding="utf-8") as f:
+                f.write(sexpdata.dumps(data))
+
+            # Reload board in memory so subsequent SWIG calls see the updated file
+            self.board = pcbnew.LoadBoard(board_path)
+
             return {
                 "success": True,
                 "message": f"Resized {len(resized)} zone(s)",
                 "bounds": {
-                    "left": left_nm / scale,
-                    "top": top_nm / scale,
-                    "right": right_nm / scale,
-                    "bottom": bottom_nm / scale,
-                    "unit": unit,
+                    "left": left,
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "unit": "mm",
                 },
-                "zones": resized,
+                "zones": [{"layer": n} for n in resized],
             }
 
         except Exception as e:

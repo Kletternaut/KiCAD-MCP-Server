@@ -1,6 +1,6 @@
 {
   "name": "kicad-mcp",
-  "version": "2.1.1q",
+  "version": "2.1.1r",
   "description": "AI-assisted PCB design with KiCAD via Model Context Protocol",
   "type": "module",
   "main": "dist/index.js",
