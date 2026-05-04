@@ -19,21 +19,93 @@ class BoardOutlineCommands:
         self.board = board
         self.board_path: Optional[str] = None  # set by KiCadInterface after open_project
 
+    def _board_is_usable(self) -> bool:
+        """Return True if self.board is a real BOARD (not SwigPyObject)."""
+        return self.board is not None and hasattr(self.board, "GetDrawings")
+
+    def _add_board_outline_sexpdata(
+        self,
+        board_path: str,
+        shape: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        unit: str,
+    ) -> None:
+        """Write Edge.Cuts outline directly to the .kicad_pcb file via sexpdata.
+
+        Removes all existing Edge.Cuts graphic items and adds a new rectangle
+        (as 4 gr_line elements).  Only rectangle shape is supported here;
+        called as fallback when self.board is a SwigPyObject.
+        """
+        import sexpdata
+
+        with open(board_path, encoding="utf-8") as fh:
+            data = sexpdata.loads(fh.read())
+
+        def _sym(v: Any) -> str:
+            return v.value() if hasattr(v, "value") else str(v)
+
+        def _layer_of(node: list) -> str:
+            for child in node[1:]:
+                if isinstance(child, list) and child and _sym(child[0]) == "layer":
+                    v = child[1]
+                    return v if isinstance(v, str) else _sym(v)
+            return ""
+
+        EDGE_SHAPES = {"gr_line", "gr_rect", "gr_circle", "gr_poly", "gr_arc"}
+
+        # Remove existing Edge.Cuts drawing items
+        filtered = []
+        for item in data:
+            if (
+                isinstance(item, list)
+                and item
+                and _sym(item[0]) in EDGE_SHAPES
+                and _layer_of(item) == "Edge.Cuts"
+            ):
+                continue
+            filtered.append(item)
+
+        # Build 4 gr_line items for the rectangle
+        x2 = round(x + width, 6)
+        y2 = round(y + height, 6)
+        x = round(x, 6)
+        y = round(y, 6)
+        corners = [(x, y, x2, y), (x2, y, x2, y2), (x2, y2, x, y2), (x, y2, x, y)]
+        for x1, y1, xe, ye in corners:
+            line = [
+                sexpdata.Symbol("gr_line"),
+                [sexpdata.Symbol("start"), x1, y1],
+                [sexpdata.Symbol("end"), xe, ye],
+                [
+                    sexpdata.Symbol("stroke"),
+                    [sexpdata.Symbol("width"), 0.05],
+                    [sexpdata.Symbol("type"), sexpdata.Symbol("solid")],
+                ],
+                [sexpdata.Symbol("layer"), "Edge.Cuts"],
+            ]
+            filtered.append(line)
+
+        with open(board_path, "w", encoding="utf-8") as fh:
+            fh.write(sexpdata.dumps(filtered))
+
     def add_board_outline(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Add a board outline to the PCB"""
         try:
-            if not self.board:
+            board_path = self.board_path
+            if not board_path and self._board_is_usable():
+                try:
+                    board_path = self.board.GetFileName()
+                except Exception:
+                    pass
+            if not board_path and not self._board_is_usable():
                 return {
                     "success": False,
                     "message": "No board is loaded",
                     "errorDetails": "Load or create a board first",
                 }
-
-            # Remove existing Edge.Cuts items before drawing the new outline
-            edge_layer = self.board.GetLayerID("Edge.Cuts")
-            for item in list(self.board.GetDrawings()):
-                if item.GetLayer() == edge_layer:
-                    self.board.Remove(item)
 
             # Claude sends dimensions nested inside a "params" key:
             # {"shape": "rectangle", "params": {"x": 0, "y": 0, "width": 38, ...}}
@@ -79,6 +151,46 @@ class BoardOutlineCommands:
                     "message": "Invalid shape",
                     "errorDetails": f"Shape '{shape}' not supported",
                 }
+
+            # --- sexpdata fallback when SWIG board is poisoned (SwigPyObject) ---
+            if not self._board_is_usable():
+                if shape != "rectangle" or width is None or height is None:
+                    return {
+                        "success": False,
+                        "message": "Only rectangle shape supported without active SWIG board",
+                        "errorDetails": "Reload the project to use other shapes",
+                    }
+                if board_path is None:
+                    return {
+                        "success": False,
+                        "message": "Board file path unknown",
+                        "errorDetails": "Open a project first",
+                    }
+                top_left_x = center_x - width / 2.0
+                top_left_y = center_y - height / 2.0
+                self._add_board_outline_sexpdata(
+                    board_path, shape, top_left_x, top_left_y, width, height, unit
+                )
+                return {
+                    "success": True,
+                    "message": f"Added board outline: {shape}",
+                    "outline": {
+                        "shape": shape,
+                        "width": width,
+                        "height": height,
+                        "center": {"x": center_x, "y": center_y, "unit": unit},
+                        "radius": None,
+                        "cornerRadius": 0,
+                        "points": [],
+                    },
+                }
+
+            # --- SWIG path (board is a real BOARD object) ---
+            # Remove existing Edge.Cuts items before drawing the new outline
+            edge_layer = self.board.GetLayerID("Edge.Cuts")
+            for item in list(self.board.GetDrawings()):
+                if item.GetLayer() == edge_layer:
+                    self.board.Remove(item)
 
             # Convert to internal units (nanometers)
             scale = 1000000 if unit == "mm" else 25400000  # mm or inch to nm
