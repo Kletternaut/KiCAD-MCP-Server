@@ -194,7 +194,6 @@ class BoardViewCommands:
                 # Compute bounds from real geometry (bounding boxes), not only
                 # center points. This ensures full pad/component outlines are
                 # included when deriving copper/footprint extents.
-                edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
                 min_x = min_y = float("inf")
                 max_x = max_y = float("-inf")
 
@@ -213,6 +212,7 @@ class BoardViewCommands:
                     for fp in self.board.GetFootprints():
                         include_bbox(fp.GetBoundingBox())
                 else:
+                    edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
                     for track in self.board.GetTracks():
                         if track.GetLayer() == edge_cuts_id:
                             continue
