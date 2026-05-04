@@ -1412,9 +1412,6 @@ class RoutingCommands:
             with open(board_path, "w", encoding="utf-8") as f:
                 f.write(sexpdata.dumps(data))
 
-            # Reload board in memory so subsequent SWIG calls see the updated file
-            self.board = pcbnew.LoadBoard(board_path)
-
             return {
                 "success": True,
                 "message": f"Resized {len(resized)} zone(s)",
