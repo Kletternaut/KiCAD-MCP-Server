@@ -1,48 +1,15 @@
-"""Unit tests for resize_zones – sexpdata file-based implementation."""
+"""Unit tests for resize_zones - subprocess-based implementation."""
 
+import json
 import sys
-import textwrap
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
-# Minimal .kicad_pcb with two zones (F.Cu GND, B.Cu GND)
-_MINIMAL_PCB = textwrap.dedent("""\
-    (kicad_pcb
-      (version 20221018)
-      (layers
-        (0 "F.Cu" signal)
-        (31 "B.Cu" signal)
-        (44 "Edge.Cuts" user)
-      )
-      (zone
-        (net 1)
-        (net_name "GND")
-        (layer "F.Cu")
-        (polygon
-          (pts
-            (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
-          )
-        )
-      )
-      (zone
-        (net 1)
-        (net_name "GND")
-        (layer "B.Cu")
-        (polygon
-          (pts
-            (xy 0 0) (xy 100 0) (xy 100 100) (xy 0 100)
-          )
-        )
-      )
-    )
-    """)
-
 
 def _make_routing_module():
-    """Import RoutingCommands with pcbnew stubbed out."""
     pcbnew_stub = types.ModuleType("pcbnew")
     pcbnew_stub.VECTOR2I = lambda x, y: (x, y)
     pcbnew_stub.FromMM = lambda v: int(v * 1_000_000)
@@ -55,57 +22,58 @@ def _make_routing_module():
     return mod.RoutingCommands
 
 
-def _make_rc(tmp_path, content=_MINIMAL_PCB):
-    pcb_file = tmp_path / "test.kicad_pcb"
-    pcb_file.write_text(content, encoding="utf-8")
-
+def _make_rc():
     RoutingCommands = _make_routing_module()
     rc = RoutingCommands.__new__(RoutingCommands)
-
     board = MagicMock()
-    board.GetFileName.return_value = str(pcb_file)
-    board.GetLayerID.side_effect = lambda n: {"F.Cu": 0, "B.Cu": 31, "Edge.Cuts": 44}.get(n, -1)
-    # pcbnew.LoadBoard stub returns same mock
-    import pcbnew
-
-    pcbnew.LoadBoard = MagicMock(return_value=board)
+    board.GetFileName.return_value = "test.kicad_pcb"
     rc.board = board
-    return rc, pcb_file
+    rc._find_kicad_python = MagicMock(return_value=sys.executable)
+    return rc
 
 
 class TestResizeZones:
-    def test_resize_zones_explicit_bounds(self, tmp_path):
-        rc, pcb_file = _make_rc(tmp_path)
+    def _run_with_subprocess(self, rc, params, zones_result):
+        stdout = json.dumps(zones_result)
+        mock_proc = MagicMock()
+        mock_proc.stdout = stdout
+        mock_proc.stderr = ""
+        mock_proc.returncode = 0
+        with patch("subprocess.run", return_value=mock_proc):
+            return rc.resize_zones(params)
 
-        result = rc.resize_zones({"left": 10, "top": 20, "right": 110, "bottom": 120, "unit": "mm"})
-
-        assert result["success"] is True
-        assert len(result["zones"]) == 2  # both F.Cu and B.Cu resized
-        content = pcb_file.read_text(encoding="utf-8")
-        assert "10" in content
-        assert "120" in content
-
-    def test_resize_zones_layer_filter(self, tmp_path):
-        rc, pcb_file = _make_rc(tmp_path)
-
-        result = rc.resize_zones(
-            {"left": 5, "top": 5, "right": 50, "bottom": 50, "layers": ["F.Cu"], "unit": "mm"}
+    def test_resize_zones_explicit_bounds(self):
+        rc = _make_rc()
+        result = self._run_with_subprocess(
+            rc,
+            {"left": 10, "top": 20, "right": 110, "bottom": 120, "unit": "mm"},
+            {"success": True, "zones": [{"layer": "F.Cu"}, {"layer": "B.Cu"}]},
         )
+        assert result["success"] is True
+        assert len(result["zones"]) == 2
+        assert result["bounds"]["left"] == 10
 
+    def test_resize_zones_layer_filter(self):
+        rc = _make_rc()
+        result = self._run_with_subprocess(
+            rc,
+            {"left": 5, "top": 5, "right": 50, "bottom": 50, "layers": ["F.Cu"]},
+            {"success": True, "zones": [{"layer": "F.Cu"}]},
+        )
         assert result["success"] is True
         assert len(result["zones"]) == 1
         assert result["zones"][0]["layer"] == "F.Cu"
 
-    def test_resize_zones_no_zones(self, tmp_path):
-        empty_pcb = textwrap.dedent("""\
-            (kicad_pcb
-              (version 20221018)
-              (layers (0 "F.Cu" signal))
-            )
-            """)
-        rc, _ = _make_rc(tmp_path, empty_pcb)
-
-        result = rc.resize_zones({"left": 0, "top": 0, "right": 100, "bottom": 100, "unit": "mm"})
-
+    def test_resize_zones_no_zones(self):
+        rc = _make_rc()
+        result = self._run_with_subprocess(
+            rc,
+            {"left": 0, "top": 0, "right": 100, "bottom": 100},
+            {
+                "success": False,
+                "message": "No zones found to resize",
+                "errorDetails": "Check layer names or add copper pours first",
+            },
+        )
         assert result["success"] is False
         assert "No zones" in result["message"]

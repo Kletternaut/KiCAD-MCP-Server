@@ -1239,16 +1239,19 @@ class RoutingCommands:
             }
 
     def resize_zones(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Resize all copper zones on given layers to a new bounding rectangle.
+        """Resize all copper zones on given layers to a new bounding rectangle,
+        then refill and save.
 
-        Uses direct sexpdata file manipulation instead of the SWIG zone API to
-        avoid triggering KiCad's internal zone recalculation (which blocks for >30s).
+        Runs in a subprocess using the KiCad Python interpreter so that
+        pcbnew.LoadBoard() gets a clean process state (no dirty SWIG objects).
 
         The new rectangle is defined by left/top/right/bottom, or x/y+width/height.
         If no explicit bounds are given the tool computes the Cu-extents of the board
         and adds the requested padding (default 1 mm on each side).
         """
-        import sexpdata
+        import json
+        import subprocess
+        import sys
 
         try:
             if not self.board:
@@ -1313,108 +1316,103 @@ class RoutingCommands:
 
             layers_param = params.get("layers")  # e.g. ["F.Cu", "B.Cu"] or None = all
 
-            # --- Parse .kicad_pcb with sexpdata and patch zone polygons ---
-            with open(board_path, encoding="utf-8") as f:
-                raw = f.read()
-            data = sexpdata.loads(raw)
+            # --- Run resize + refill + save in a fresh KiCad Python subprocess ---
+            # This avoids the board.Zones() SWIG timeout and the LoadBoard()
+            # SwigPyObject poisoning that happens in the long-running MCP process.
+            kicad_python = self._find_kicad_python()
 
-            # KiCad layer name → number map (built from (layers ...) section)
-            layer_name_to_num: dict = {}
-            for item in data[1:]:
-                if (
-                    isinstance(item, list)
-                    and len(item) > 0
-                    and isinstance(item[0], sexpdata.Symbol)
-                    and item[0].value() == "layers"
-                ):
-                    for entry in item[1:]:
-                        if isinstance(entry, list) and len(entry) >= 2:
-                            try:
-                                num = int(entry[0])
-                                name = entry[1] if isinstance(entry[1], str) else str(entry[1])
-                                layer_name_to_num[name] = num
-                            except (ValueError, TypeError):
-                                pass
-                    break
+            script = f"""
+import sys, json
+sys.path.insert(0, r"C:\\\\Program Files\\\\KiCad\\\\9.0\\\\bin")
+try:
+    import pcbnew
+    board = pcbnew.LoadBoard({board_path!r})
+    if not hasattr(board, "GetFileName"):
+        print(json.dumps({{"success": False, "message": "LoadBoard returned SwigPyObject"}}))
+        sys.exit(0)
 
-            # Determine target layer numbers
-            if layers_param:
-                target_nums = {layer_name_to_num.get(n, -1) for n in layers_param}
-                target_nums.discard(-1)
-                target_names = set(layers_param)
-            else:
-                target_nums = None
-                target_names = None
+    layers_param = {json.dumps(layers_param)}
+    target_ids = None
+    if layers_param:
+        target_ids = {{board.GetLayerID(n) for n in layers_param}}
 
-            def _zone_layer_name(zone_node: list) -> str:
-                for item in zone_node[1:]:
-                    if isinstance(item, list) and len(item) >= 2:
-                        if isinstance(item[0], sexpdata.Symbol) and item[0].value() == "layer":
-                            v = item[1]
-                            return (
-                                v
-                                if isinstance(v, str)
-                                else (v.value() if hasattr(v, "value") else str(v))
-                            )
-                return ""
+    NM = 1_000_000
+    left_nm  = int({left}  * NM)
+    top_nm   = int({top}   * NM)
+    right_nm = int({right} * NM)
+    bottom_nm= int({bottom}* NM)
 
-            def _build_polygon(pts: list) -> list:
-                """Build a sexpdata (polygon (pts (xy ...) ...)) node."""
-                xy_nodes = []
-                for x, y in pts:
-                    xy_nodes.append([sexpdata.Symbol("xy"), round(x, 6), round(y, 6)])
-                pts_node = [sexpdata.Symbol("pts")] + xy_nodes
-                return [sexpdata.Symbol("polygon"), pts_node]
+    resized = []
+    count = board.GetAreaCount()
+    for i in range(count):
+        zone = board.GetArea(i)
+        if not hasattr(zone, "GetLayer"):
+            continue
+        if target_ids is not None and zone.GetLayer() not in target_ids:
+            continue
+        outline = zone.Outline()
+        outline.RemoveAllContours()
+        outline.NewOutline()
+        outline.Append(pcbnew.VECTOR2I(left_nm,  top_nm))
+        outline.Append(pcbnew.VECTOR2I(right_nm, top_nm))
+        outline.Append(pcbnew.VECTOR2I(right_nm, bottom_nm))
+        outline.Append(pcbnew.VECTOR2I(left_nm,  bottom_nm))
+        lname = board.GetLayerName(zone.GetLayer())
+        resized.append(lname)
 
-            new_rect = [(left, top), (right, top), (right, bottom), (left, bottom)]
+    if not resized:
+        print(json.dumps({{"success": False, "message": "No zones found to resize",
+                           "errorDetails": "Check layer names or add copper pours first"}}))
+        sys.exit(0)
 
-            resized = []
-            for i, item in enumerate(data):
-                if not (
-                    isinstance(item, list)
-                    and len(item) > 0
-                    and isinstance(item[0], sexpdata.Symbol)
-                    and item[0].value() == "zone"
-                ):
-                    continue
-                lname = _zone_layer_name(item)
-                if target_names is not None and lname not in target_names:
-                    continue
+    filler = pcbnew.ZONE_FILLER(board)
+    filler.Fill(board.Zones())
+    board.Save({board_path!r})
+    print(json.dumps({{"success": True, "zones": [dict(layer=n) for n in resized]}}))
+except Exception as e:
+    import traceback
+    print(json.dumps({{"success": False, "message": str(e),
+                       "errorDetails": traceback.format_exc()}}))
+"""
 
-                # Replace first (polygon ...) node inside this zone
-                new_item = []
-                polygon_replaced = False
-                for child in item:
-                    if (
-                        isinstance(child, list)
-                        and len(child) > 0
-                        and isinstance(child[0], sexpdata.Symbol)
-                        and child[0].value() == "polygon"
-                        and not polygon_replaced
-                    ):
-                        new_item.append(_build_polygon(new_rect))
-                        polygon_replaced = True
-                    else:
-                        new_item.append(child)
-                if not polygon_replaced:
-                    # No polygon yet → append one
-                    new_item.append(_build_polygon(new_rect))
-                data[i] = new_item
-                resized.append(lname)
-
-            if not resized:
+            try:
+                proc = subprocess.run(
+                    [kicad_python, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                output = proc.stdout.strip()
+                # Find the JSON line (last line starting with '{')
+                json_line = next(
+                    (l for l in reversed(output.splitlines()) if l.startswith("{")), None
+                )
+                if json_line:
+                    sub_result = json.loads(json_line)
+                else:
+                    sub_result = {
+                        "success": False,
+                        "message": "No JSON output from subprocess",
+                        "errorDetails": proc.stdout + proc.stderr,
+                    }
+            except subprocess.TimeoutExpired:
                 return {
                     "success": False,
-                    "message": "No zones found to resize",
-                    "errorDetails": "Check layer names or add copper pours first",
+                    "message": "resize_zones subprocess timed out after 120s",
+                }
+            except FileNotFoundError:
+                return {
+                    "success": False,
+                    "message": f"KiCad Python not found at: {kicad_python}",
+                    "errorDetails": "Check KiCad installation path",
                 }
 
-            with open(board_path, "w", encoding="utf-8") as f:
-                f.write(sexpdata.dumps(data))
+            if not sub_result.get("success"):
+                return sub_result
 
             return {
                 "success": True,
-                "message": f"Resized {len(resized)} zone(s)",
+                "message": f"Resized and refilled {len(sub_result.get('zones', []))} zone(s)",
                 "bounds": {
                     "left": left,
                     "top": top,
@@ -1422,7 +1420,7 @@ class RoutingCommands:
                     "bottom": bottom,
                     "unit": "mm",
                 },
-                "zones": [{"layer": n} for n in resized],
+                "zones": sub_result.get("zones", []),
             }
 
         except Exception as e:
@@ -1432,6 +1430,23 @@ class RoutingCommands:
                 "message": "Failed to resize zones",
                 "errorDetails": str(e),
             }
+
+    def _find_kicad_python(self) -> str:
+        """Return the path to the KiCad-bundled Python interpreter."""
+        import os
+        import sys
+
+        candidates = [
+            r"C:\Program Files\KiCad\9.0\bin\python.exe",
+            r"C:\Program Files\KiCad\8.0\bin\python.exe",
+            "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
+            "/usr/bin/python3",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        # fallback: current interpreter (may not have pcbnew)
+        return sys.executable
 
     def route_differential_pair(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Route a differential pair between two sets of points or pads"""
