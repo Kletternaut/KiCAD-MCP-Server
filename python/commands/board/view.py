@@ -205,24 +205,6 @@ class BoardViewCommands:
             # Select bounding box source
             source = params.get("source", "edge_cuts")
             if source in ("copper", "footprints"):
-                # Parse the .kicad_pcb file directly with sexpdata to avoid
-                # SWIG SwigPyObject bugs after board mutations / reloads.
-                import sexpdata
-
-                board_path = self._get_board_path()
-                if not board_path:
-                    return {
-                        "success": False,
-                        "message": "Board has no file path",
-                        "errorDetails": "Open a project first",
-                    }
-
-                with open(board_path, encoding="utf-8") as fh:
-                    data = sexpdata.loads(fh.read())
-
-                def _sym(v: Any) -> str:
-                    return v.value() if hasattr(v, "value") else str(v)
-
                 min_x = min_y = float("inf")
                 max_x = max_y = float("-inf")
 
@@ -233,32 +215,59 @@ class BoardViewCommands:
                     max_x = max(max_x, x)
                     max_y = max(max_y, y)
 
-                import math
+                # --- SWIG path (primary): correct bounding box incl. labels & courtyard ---
+                swig_ok = False
+                if source == "footprints" and self.board and hasattr(self.board, "GetFootprints"):
+                    try:
+                        fps = self.board.GetFootprints()
+                        for fp in fps:
+                            bb = fp.GetBoundingBox()
+                            _upd(
+                                pcbnew.ToMM(bb.GetLeft()),
+                                pcbnew.ToMM(bb.GetTop()),
+                            )
+                            _upd(
+                                pcbnew.ToMM(bb.GetRight()),
+                                pcbnew.ToMM(bb.GetBottom()),
+                            )
+                        swig_ok = True
+                    except Exception:
+                        min_x = min_y = float("inf")
+                        max_x = max_y = float("-inf")
 
-                for item in data:
-                    if not (isinstance(item, list) and item and _sym(item[0]) == "footprint"):
-                        continue
-                    # Collect footprint position and rotation
-                    fp_x: float = 0.0
-                    fp_y: float = 0.0
-                    fp_rot: float = 0.0  # degrees
-                    for child in item[1:]:
-                        if isinstance(child, list) and child and _sym(child[0]) == "at":
-                            fp_x = float(child[1])
-                            fp_y = float(child[2])
-                            fp_rot = float(child[3]) if len(child) > 3 else 0.0
-                            break
-                    fp_rot_rad = math.radians(fp_rot)
-                    cos_r = math.cos(fp_rot_rad)
-                    sin_r = math.sin(fp_rot_rad)
+                # --- sexpdata fallback (when SWIG fails / source==copper) ---
+                if not swig_ok:
+                    import sexpdata
 
-                    # Walk pads for a tight bound, applying footprint rotation
-                    for child in item[1:]:
-                        if not (isinstance(child, list) and child):
+                    board_path = self._get_board_path()
+                    if not board_path:
+                        return {
+                            "success": False,
+                            "message": "Board has no file path",
+                            "errorDetails": "Open a project first",
+                        }
+
+                    with open(board_path, encoding="utf-8") as fh:
+                        data = sexpdata.loads(fh.read())
+
+                    def _sym(v: Any) -> str:
+                        return v.value() if hasattr(v, "value") else str(v)
+
+                    for item in data:
+                        if not (isinstance(item, list) and item and _sym(item[0]) == "footprint"):
                             continue
-                        tag = _sym(child[0])
-                        if tag == "pad":
-                            # pad: (pad ... (at dx dy [pad_rot]) (size w h) ...)
+                        fp_x: float = 0.0
+                        fp_y: float = 0.0
+                        for child in item[1:]:
+                            if isinstance(child, list) and child and _sym(child[0]) == "at":
+                                fp_x = float(child[1])
+                                fp_y = float(child[2])
+                                break
+                        for child in item[1:]:
+                            if not (isinstance(child, list) and child):
+                                continue
+                            if _sym(child[0]) != "pad":
+                                continue
                             pad_dx = pad_dy = 0.0
                             pad_w = pad_h = 0.0
                             for pchild in child[1:]:
@@ -274,15 +283,10 @@ class BoardViewCommands:
                                             if len(pchild) > 2
                                             else float(pchild[1])
                                         )
-                            # Rotate pad offset by footprint rotation
-                            rx = pad_dx * cos_r - pad_dy * sin_r
-                            ry = pad_dx * sin_r + pad_dy * cos_r
-                            px = fp_x + rx
-                            py = fp_y + ry
-                            # After rotation, width/height axes also swap – use max extent
-                            half = max(pad_w, pad_h) / 2
-                            _upd(px - half, py - half)
-                            _upd(px + half, py + half)
+                            px = fp_x + pad_dx
+                            py = fp_y + pad_dy
+                            _upd(px - pad_w / 2, py - pad_h / 2)
+                            _upd(px + pad_w / 2, py + pad_h / 2)
 
                 if min_x == float("inf"):
                     return {
@@ -291,7 +295,6 @@ class BoardViewCommands:
                         "errorDetails": "Place components first",
                     }
 
-                # sexpdata values are already in mm
                 conv = 1.0 if unit == "mm" else 1.0 / 25.4
                 left = min_x * conv
                 top = min_y * conv
