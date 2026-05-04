@@ -18,6 +18,7 @@ class RoutingCommands:
     def __init__(self, board: Optional[pcbnew.BOARD] = None):
         """Initialize with optional board instance"""
         self.board = board
+        self.board_path: Optional[str] = None  # set by KiCadInterface after open_project
 
     def add_net(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Add a new net to the PCB"""
@@ -1261,7 +1262,12 @@ class RoutingCommands:
                     "errorDetails": "Load or create a board first",
                 }
 
-            board_path = self.board.GetFileName()
+            board_path = self.board_path
+            if not board_path and self.board and hasattr(self.board, "GetFileName"):
+                try:
+                    board_path = self.board.GetFileName()
+                except Exception:
+                    pass
             if not board_path:
                 return {"success": False, "message": "Board has no file path"}
 

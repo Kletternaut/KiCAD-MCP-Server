@@ -20,6 +20,20 @@ class BoardViewCommands:
     def __init__(self, board: Optional[pcbnew.BOARD] = None):
         """Initialize with optional board instance"""
         self.board = board
+        self.board_path: Optional[str] = None  # set by KiCadInterface after open_project
+
+    def _get_board_path(self) -> Optional[str]:
+        """Return the board file path, preferring the cached path over SWIG call."""
+        if self.board_path:
+            return self.board_path
+        if self.board and hasattr(self.board, "GetFileName"):
+            try:
+                p = self.board.GetFileName()
+                if p:
+                    return p
+            except Exception:
+                pass
+        return None
 
     def get_board_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Get information about the current board"""
@@ -177,7 +191,7 @@ class BoardViewCommands:
     def get_board_extents(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Get the bounding box extents of the board"""
         try:
-            if not self.board:
+            if not self._get_board_path():
                 return {
                     "success": False,
                     "message": "No board is loaded",
@@ -191,48 +205,85 @@ class BoardViewCommands:
             # Select bounding box source
             source = params.get("source", "edge_cuts")
             if source in ("copper", "footprints"):
-                # Compute bounds from real geometry (bounding boxes), not only
-                # center points. This ensures full pad/component outlines are
-                # included when deriving copper/footprint extents.
+                # Parse the .kicad_pcb file directly with sexpdata to avoid
+                # SWIG SwigPyObject bugs after board mutations / reloads.
+                import sexpdata
+
+                board_path = self._get_board_path()
+                if not board_path:
+                    return {
+                        "success": False,
+                        "message": "Board has no file path",
+                        "errorDetails": "Open a project first",
+                    }
+
+                with open(board_path, encoding="utf-8") as fh:
+                    data = sexpdata.loads(fh.read())
+
+                def _sym(v: Any) -> str:
+                    return v.value() if hasattr(v, "value") else str(v)
+
                 min_x = min_y = float("inf")
                 max_x = max_y = float("-inf")
 
-                def include_bbox(bbox: Any) -> None:
+                def _upd(x: float, y: float) -> None:
                     nonlocal min_x, min_y, max_x, max_y
-                    x1 = bbox.GetX()
-                    y1 = bbox.GetY()
-                    x2 = x1 + bbox.GetWidth()
-                    y2 = y1 + bbox.GetHeight()
-                    min_x = min(min_x, x1)
-                    min_y = min(min_y, y1)
-                    max_x = max(max_x, x2)
-                    max_y = max(max_y, y2)
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
 
-                if source == "footprints":
-                    for fp in self.board.GetFootprints():
-                        include_bbox(fp.GetBoundingBox())
-                else:
-                    edge_cuts_id = self.board.GetLayerID("Edge.Cuts")
-                    for track in self.board.GetTracks():
-                        if track.GetLayer() == edge_cuts_id:
+                for item in data:
+                    if not (isinstance(item, list) and item and _sym(item[0]) == "footprint"):
+                        continue
+                    # Collect all (at x y) and pad (at x y) positions + sizes
+                    fp_x: float = 0.0
+                    fp_y: float = 0.0
+                    for child in item[1:]:
+                        if isinstance(child, list) and child and _sym(child[0]) == "at":
+                            fp_x = float(child[1])
+                            fp_y = float(child[2])
+                            break
+                    # Walk pads and courtyard rects for a tight bound
+                    for child in item[1:]:
+                        if not (isinstance(child, list) and child):
                             continue
-                        include_bbox(track.GetBoundingBox())
-
-                    for fp in self.board.GetFootprints():
-                        for pad in fp.Pads():
-                            include_bbox(pad.GetBoundingBox())
+                        tag = _sym(child[0])
+                        if tag == "pad":
+                            # pad: (pad ... (at dx dy) (size w h) ...)
+                            pad_dx = pad_dy = 0.0
+                            pad_w = pad_h = 0.0
+                            for pchild in child[1:]:
+                                if isinstance(pchild, list) and pchild:
+                                    ptag = _sym(pchild[0])
+                                    if ptag == "at":
+                                        pad_dx = float(pchild[1])
+                                        pad_dy = float(pchild[2]) if len(pchild) > 2 else 0.0
+                                    elif ptag == "size":
+                                        pad_w = float(pchild[1])
+                                        pad_h = (
+                                            float(pchild[2])
+                                            if len(pchild) > 2
+                                            else float(pchild[1])
+                                        )
+                            px = fp_x + pad_dx
+                            py = fp_y + pad_dy
+                            _upd(px - pad_w / 2, py - pad_h / 2)
+                            _upd(px + pad_w / 2, py + pad_h / 2)
 
                 if min_x == float("inf"):
                     return {
                         "success": False,
-                        "message": "No copper items found on the board",
-                        "errorDetails": "Place components or route tracks first",
+                        "message": "No footprints found on the board",
+                        "errorDetails": "Place components first",
                     }
 
-                left = min_x / scale
-                top = min_y / scale
-                right = max_x / scale
-                bottom = max_y / scale
+                # sexpdata values are already in mm
+                conv = 1.0 if unit == "mm" else 1.0 / 25.4
+                left = min_x * conv
+                top = min_y * conv
+                right = max_x * conv
+                bottom = max_y * conv
                 width = right - left
                 height = bottom - top
                 center_x = (left + right) / 2
@@ -258,7 +309,7 @@ class BoardViewCommands:
                 # that return SwigPyObject after board mutations.
                 import sexpdata
 
-                board_path = self.board.GetFileName()
+                board_path = self._get_board_path()
                 if not board_path:
                     return {
                         "success": False,

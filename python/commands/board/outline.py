@@ -17,6 +17,7 @@ class BoardOutlineCommands:
     def __init__(self, board: Optional[pcbnew.BOARD] = None):
         """Initialize with optional board instance"""
         self.board = board
+        self.board_path: Optional[str] = None  # set by KiCadInterface after open_project
 
     def add_board_outline(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Add a board outline to the PCB"""
@@ -188,7 +189,12 @@ class BoardOutlineCommands:
 
             # Save board immediately so subsequent SWIG calls (e.g. Zones())
             # don't block on a dirty board object.
-            board_path = self.board.GetFileName()
+            board_path = self.board_path
+            if not board_path:
+                try:
+                    board_path = self.board.GetFileName()
+                except Exception:
+                    pass
             if board_path:
                 self.board.Save(board_path)
 

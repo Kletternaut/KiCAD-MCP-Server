@@ -28,6 +28,7 @@ def _make_rc():
     board = MagicMock()
     board.GetFileName.return_value = "test.kicad_pcb"
     rc.board = board
+    rc.board_path = "test.kicad_pcb"
     rc._find_kicad_python = MagicMock(return_value=sys.executable)
     return rc
 

@@ -593,6 +593,11 @@ class KiCADInterface:
                         # Get board from the project commands handler
                         self.board = self.project_commands.board
                         self._update_command_handlers()
+                        # Propagate board_path so all commands can access it
+                        # even when self.board is a SwigPyObject (SWIG-poisoned).
+                        board_path = self.project_commands.board_path
+                        if board_path:
+                            self._propagate_board_path(board_path)
                     elif command in self._BOARD_MUTATING_COMMANDS:
                         # Auto-save after every board mutation via SWIG.
                         # Prevents data loss if Claude hits context limit before
@@ -675,6 +680,18 @@ class KiCADInterface:
         self.design_rule_commands.board = self.board
         self.export_commands.board = self.board
         self.freerouting_commands.board = self.board
+
+    def _propagate_board_path(self, board_path: str) -> None:
+        """Store board_path in all command handlers that need file-based access.
+
+        This ensures commands can read the PCB file directly even when
+        self.board is a SwigPyObject (SWIG-poisoned after board reload).
+        """
+        logger.debug(f"Propagating board_path: {board_path}")
+        self.project_commands.board_path = board_path
+        self.routing_commands.board_path = board_path
+        self.board_commands.view_commands.board_path = board_path
+        self.board_commands.outline_commands.board_path = board_path
 
     # Schematic command handlers
     def _handle_create_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:

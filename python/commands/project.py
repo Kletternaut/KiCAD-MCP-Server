@@ -18,6 +18,7 @@ class ProjectCommands:
     def __init__(self, board: Optional[pcbnew.BOARD] = None):
         """Initialize with optional board instance"""
         self.board = board
+        self.board_path: Optional[str] = None  # always valid even if board is SwigPyObject
 
     def create_project(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new KiCAD project"""
@@ -162,6 +163,7 @@ class ProjectCommands:
             # Load the board
             board = pcbnew.LoadBoard(board_path)
             self.board = board
+            self.board_path = board_path  # store separately – survives SwigPyObject poisoning
 
             return {
                 "success": True,
