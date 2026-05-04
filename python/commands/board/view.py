@@ -233,24 +233,32 @@ class BoardViewCommands:
                     max_x = max(max_x, x)
                     max_y = max(max_y, y)
 
+                import math
+
                 for item in data:
                     if not (isinstance(item, list) and item and _sym(item[0]) == "footprint"):
                         continue
-                    # Collect all (at x y) and pad (at x y) positions + sizes
+                    # Collect footprint position and rotation
                     fp_x: float = 0.0
                     fp_y: float = 0.0
+                    fp_rot: float = 0.0  # degrees
                     for child in item[1:]:
                         if isinstance(child, list) and child and _sym(child[0]) == "at":
                             fp_x = float(child[1])
                             fp_y = float(child[2])
+                            fp_rot = float(child[3]) if len(child) > 3 else 0.0
                             break
-                    # Walk pads and courtyard rects for a tight bound
+                    fp_rot_rad = math.radians(fp_rot)
+                    cos_r = math.cos(fp_rot_rad)
+                    sin_r = math.sin(fp_rot_rad)
+
+                    # Walk pads for a tight bound, applying footprint rotation
                     for child in item[1:]:
                         if not (isinstance(child, list) and child):
                             continue
                         tag = _sym(child[0])
                         if tag == "pad":
-                            # pad: (pad ... (at dx dy) (size w h) ...)
+                            # pad: (pad ... (at dx dy [pad_rot]) (size w h) ...)
                             pad_dx = pad_dy = 0.0
                             pad_w = pad_h = 0.0
                             for pchild in child[1:]:
@@ -266,10 +274,15 @@ class BoardViewCommands:
                                             if len(pchild) > 2
                                             else float(pchild[1])
                                         )
-                            px = fp_x + pad_dx
-                            py = fp_y + pad_dy
-                            _upd(px - pad_w / 2, py - pad_h / 2)
-                            _upd(px + pad_w / 2, py + pad_h / 2)
+                            # Rotate pad offset by footprint rotation
+                            rx = pad_dx * cos_r - pad_dy * sin_r
+                            ry = pad_dx * sin_r + pad_dy * cos_r
+                            px = fp_x + rx
+                            py = fp_y + ry
+                            # After rotation, width/height axes also swap – use max extent
+                            half = max(pad_w, pad_h) / 2
+                            _upd(px - half, py - half)
+                            _upd(px + half, py + half)
 
                 if min_x == float("inf"):
                     return {
