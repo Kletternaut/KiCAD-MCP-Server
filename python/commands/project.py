@@ -183,31 +183,83 @@ class ProjectCommands:
                 "errorDetails": str(e),
             }
 
+    def _find_kicad_python(self) -> str:
+        """Return path to KiCad's own Python executable."""
+        import sys
+
+        candidates = [
+            r"C:\Program Files\KiCad\9.0\bin\python.exe",
+            r"C:\Program Files\KiCad\8.0\bin\python.exe",
+            "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
+            "/usr/bin/python3",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return sys.executable
+
     def save_project(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Save the current KiCAD project"""
+        """Save the current KiCAD project.
+
+        Uses a subprocess LoadBoard+Save so that changes written to disk by
+        other subprocess operations (e.g. resize_zones) are preserved and not
+        overwritten by the stale in-memory SWIG board state.
+        """
+        import json
+        import subprocess
+
+        board_path = self.board_path
+        if not board_path and self.board and hasattr(self.board, "GetFileName"):
+            try:
+                board_path = self.board.GetFileName()
+            except Exception:
+                pass
+
+        if not board_path:
+            return {
+                "success": False,
+                "message": "No board is loaded",
+                "errorDetails": "Load or create a board first",
+            }
+
+        filename = params.get("filename")
+        if filename:
+            filename = os.path.abspath(os.path.expanduser(filename))
+        else:
+            filename = board_path
+
         try:
-            if not self.board:
-                return {
-                    "success": False,
-                    "message": "No board is loaded",
-                    "errorDetails": "Load or create a board first",
-                }
+            kicad_python = self._find_kicad_python()
+            script = f"""
+import sys, json
+sys.path.insert(0, r'C:\\Program Files\\KiCad\\9.0\\bin\\Lib\\site-packages')
+import pcbnew
+board = pcbnew.LoadBoard({board_path!r})
+board.SetFileName({filename!r})
+board.Save({filename!r})
+print(json.dumps({{"ok": True, "path": {filename!r}}}))
+"""
+            proc = subprocess.run(
+                [kicad_python, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(proc.stderr[-500:] if proc.stderr else "unknown error")
+            result = json.loads(proc.stdout.strip().splitlines()[-1])
+            if not result.get("ok"):
+                raise RuntimeError(str(result))
 
-            filename = params.get("filename")
-            if filename:
-                # Save to new location
-                filename = os.path.abspath(os.path.expanduser(filename))
-                self.board.SetFileName(filename)
-
-            # Save the board
-            pcbnew.SaveBoard(self.board.GetFileName(), self.board)
+            if filename != board_path:
+                self.board_path = filename
 
             return {
                 "success": True,
-                "message": f"Saved project to: {self.board.GetFileName()}",
+                "message": f"Saved project to: {filename}",
                 "project": {
-                    "name": os.path.splitext(os.path.basename(self.board.GetFileName()))[0],
-                    "path": self.board.GetFileName(),
+                    "name": os.path.splitext(os.path.basename(filename))[0],
+                    "path": filename,
                 },
             }
 
