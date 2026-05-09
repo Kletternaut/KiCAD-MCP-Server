@@ -163,19 +163,21 @@ def test_pin_positions_unchanged_at_same_transform():
         assert old_xy == new_xy
 
 
-def test_pin_positions_mirror_x_flips_x():
-    """mirror_x should negate the local X coordinate before rotation."""
+def test_pin_positions_mirror_x_flips_y():
+    """mirror_x = SYM_MIRROR_X = TRANSFORM(1,0,0,-1) negates the screen-Y
+    coordinate (eeschema symbol.h:43-44), not X. With the lib→screen Y-flip
+    applied first, this means the pin's screen Y is reflected back to lib Y."""
     sch = _make_sch()  # at (75, 105, 0), no mirror
 
-    fake_pins = {"1": {"x": 2.0, "y": 0.0}}
+    fake_pins = {"1": {"x": 0.0, "y": 2.0}}
     with patch.object(WireDragger, "get_pin_defs", return_value=fake_pins):
         pos = WireDragger.compute_pin_positions_for_rotation(sch, "Q1", 0.0, True, False)
 
     _, (old_xy, new_xy) = next(iter(pos.items()))
-    # old: pin at local (2, 0), world = (75+2, 105) = (77, 105)
-    assert abs(old_xy[0] - 77.0) < 1e-4
-    # new: mirror_x → local (-2, 0), world = (75-2, 105) = (73, 105)
-    assert abs(new_xy[0] - 73.0) < 1e-4
+    # old: pin at lib (0, 2). Y-flip → (0, -2). No mirror. World = (75, 105-2) = (75, 103).
+    assert abs(old_xy[1] - 103.0) < 1e-4
+    # new: mirror_x → negate screen-Y → (0, 2). World = (75, 105+2) = (75, 107).
+    assert abs(new_xy[1] - 107.0) < 1e-4
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +192,11 @@ def test_rotate_handler_no_crash(tmp_path):
     if _python_dir not in sys.path:
         sys.path.insert(0, _python_dir)
 
-    # Stub heavy imports before loading kicad_interface.
-    # Remove any already-loaded real modules so setdefault installs a fresh MagicMock
-    # (otherwise setdefault returns the real module and TOOL_SCHEMAS = [] corrupts it).
-    _saved_schemas = sys.modules.pop("schemas.tool_schemas", None)
-    _saved_resources = sys.modules.pop("resources.resource_definitions", None)
-    for modname in (
+    # Stub heavy imports before loading kicad_interface. Save and restore
+    # sys.modules state so we don't pollute already-imported real modules
+    # (notably schemas.tool_schemas, whose TOOL_SCHEMAS dict is shared across
+    # the test session).
+    _stub_modnames = (
         "pcbnew",
         "skip",
         "resources",
@@ -203,23 +204,32 @@ def test_rotate_handler_no_crash(tmp_path):
         "resources.resource_definitions",
         "schemas.tool_schemas",
         "annotations",
-    ):
-        sys.modules.setdefault(modname, MagicMock())
-    sys.modules["resources.resource_definitions"].RESOURCE_DEFINITIONS = {}
-    sys.modules["resources.resource_definitions"].handle_resource_read = MagicMock()
-    sys.modules["schemas.tool_schemas"].TOOL_SCHEMAS = []
-
-    _pcbnew = sys.modules["pcbnew"]
-    _pcbnew.__file__ = "/fake/pcbnew.so"
-    _pcbnew.GetBuildVersion.return_value = "9.0.0"
-
-    ki_spec = importlib.util.spec_from_file_location(
-        "kicad_interface_smoke",
-        os.path.join(os.path.dirname(__file__), "..", "python", "kicad_interface.py"),
     )
-    ki_mod = importlib.util.module_from_spec(ki_spec)
-    ki_spec.loader.exec_module(ki_mod)
-    KiCADInterface = ki_mod.KiCADInterface
+    _saved_modules = {n: sys.modules.get(n) for n in _stub_modnames}
+    try:
+        for modname in _stub_modnames:
+            sys.modules[modname] = MagicMock()
+        sys.modules["resources.resource_definitions"].RESOURCE_DEFINITIONS = {}
+        sys.modules["resources.resource_definitions"].handle_resource_read = MagicMock()
+        sys.modules["schemas.tool_schemas"].TOOL_SCHEMAS = []
+
+        _pcbnew = sys.modules["pcbnew"]
+        _pcbnew.__file__ = "/fake/pcbnew.so"
+        _pcbnew.GetBuildVersion.return_value = "9.0.0"
+
+        ki_spec = importlib.util.spec_from_file_location(
+            "kicad_interface_smoke",
+            os.path.join(os.path.dirname(__file__), "..", "python", "kicad_interface.py"),
+        )
+        ki_mod = importlib.util.module_from_spec(ki_spec)
+        ki_spec.loader.exec_module(ki_mod)
+        KiCADInterface = ki_mod.KiCADInterface
+    finally:
+        for modname, mod in _saved_modules.items():
+            if mod is None:
+                sys.modules.pop(modname, None)
+            else:
+                sys.modules[modname] = mod
 
     # Write a minimal schematic file
     sch_path = str(tmp_path / "test.kicad_sch")
@@ -262,11 +272,3 @@ def test_rotate_handler_no_crash(tmp_path):
     with open(sch_path) as f:
         updated = f.read()
     assert "90" in updated
-
-    # Restore real modules so subsequent tests see the genuine TOOL_SCHEMAS
-    sys.modules.pop("schemas.tool_schemas", None)
-    sys.modules.pop("resources.resource_definitions", None)
-    if _saved_schemas is not None:
-        sys.modules["schemas.tool_schemas"] = _saved_schemas
-    if _saved_resources is not None:
-        sys.modules["resources.resource_definitions"] = _saved_resources
